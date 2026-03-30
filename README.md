@@ -130,45 +130,61 @@ Axiom relies on on-chain validation with O(1) complexity. To keep gas costs at a
 The contract acts as an incorruptible bouncer. If a payload does not adhere to the strict rules, the transaction is reverted.
 
 ```Solidity
-// State variables
-address public owner;
-uint256 public entryFee = 0.0001 ether; // Anti-Sybil Fee for the first interaction
-mapping(address => uint8) public walletPath; // 0=New, 1=PathA(Level1), 2=PathB(Level2/3)
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
 
-constructor() { owner = msg.sender; }
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
-// The exact signature clients must call to publish a post
-function publishAxiom(
-    uint8 _level,          // 1, 2 or 3
-    bytes calldata _iv,    // 12-byte IV for Level 3, else empty "0x"
-    bytes calldata _cbor   // Opaque CBOR data
-) external payable {
-    // 1. Wallet Taint & Anti-Sybil Check
-    uint8 requiredPath = (_level == 1) ? 1 : 2;
-    uint8 currentPath = walletPath[msg.sender];
+contract Axiom is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    uint256 public entryFee;
+    mapping(address => uint8) public walletPath; // 0=New, 1=PathA(Level1), 2=PathB(Level2/3)
 
-    if (currentPath == 0) {
-        // First interaction: Must pay the entry fee to prevent State Bloat DoS
-        require(msg.value >= entryFee, "Anti-Sybil: Insufficient entry fee");
-        walletPath[msg.sender] = requiredPath;
-    } else {
-        // OPSEC Check: Cannot mix Path 1 (Level 1) and Path 2 (Level 2/3)
-        require(currentPath == requiredPath, "OPSEC Violation: Wallet is tainted");
+    event AxiomPost(address indexed sender, uint8 level, bytes iv, bytes cbor, uint256 timestamp);
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
     }
 
-    // 2. Level 3 IV Check (NIST standard for AES-GCM is 12 bytes)
-    if (_level == 3) {
-        require(_iv.length == 12, "Level 3 strictly requires a 12-byte IV");
+    function initialize() initializer public {
+        __Ownable_init(msg.sender);
+        entryFee = 0.0001 ether;
     }
 
-    // 3. Emit Event
-    emit AxiomPost(msg.sender, _level, _iv, _cbor, block.timestamp);
-}
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
-// Allows the protocol creator to withdraw fees for infrastructure funding
-function withdraw() external {
-    require(msg.sender == owner, "Only owner");
-    payable(owner).transfer(address(this).balance);
+    function publishAxiom(
+        uint8 _level,
+        bytes calldata _iv,
+        bytes calldata _cbor
+    ) external payable {
+        require(_level >= 1 && _level <= 3, "Invalid level");
+
+        uint8 requiredPath = (_level == 1) ? 1 : 2;
+        uint8 currentPath = walletPath[msg.sender];
+
+        if (currentPath == 0) {
+            require(msg.value >= entryFee, "Anti-Sybil: Insufficient entry fee");
+            walletPath[msg.sender] = requiredPath;
+        } else {
+            require(msg.value == 0, "Fee already paid");
+            require(currentPath == requiredPath, "OPSEC Violation: Wallet is tainted");
+        }
+
+        if (_level == 3) {
+            require(_iv.length == 12, "Level 3 strictly requires a 12-byte IV");
+        } else {
+            require(_iv.length == 0, "Level 1 and 2 require strictly empty IV");
+        }
+
+        emit AxiomPost(msg.sender, _level, _iv, _cbor, block.timestamp);
+    }
+
+    function withdraw() external onlyOwner {
+        payable(owner()).transfer(address(this).balance);
+    }
 }
 ```
 
